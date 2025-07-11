@@ -3,3 +3,11 @@ An official PyTorch implementation of "PreGIP: Watermarking the Pretraining of G
 
 ## Note
 We will clean our code as soon as possible, thank you!
+
+## Run the code
+To run our code in the semi-supervised setting, you can try to run
+```
+bash ./train_IPGCL.sh/
+```
+
+To run our code in transfer learning setting, you can refer to the `transfer` branch.
