@@ -1,0 +1,260 @@
+#%%
+#%%
+import os
+import sys
+
+package_dir = '/home/mfl5681/project-ipprotection/pretrain-gnns/chem'
+sys.path.append(package_dir)
+from util import MaskAtom
+
+import time
+import argparse
+import numpy as np
+import torch
+import utils
+import copy
+import yaml
+from yaml import SafeLoader
+
+
+from torch_geometric.datasets import TUDataset, MoleculeNet, GNNBenchmarkDataset
+from torch_geometric.loader import DataLoader
+
+
+
+# Dataset settings
+parser = argparse.ArgumentParser()
+parser.add_argument('--debug', action='store_true',
+        default=True, help='debug mode')
+parser.add_argument('--num_repeat', type=int, default=5)
+parser.add_argument('--no-cuda', action='store_true', default=False,
+                    help='Disables CUDA training.')
+parser.add_argument('--seed', type=int, default=15, help='Random seed.')
+parser.add_argument('--base_model', type=str, default='GIN', help='propagation model for encoder',
+                    choices=['GCN','GAT','GraphSage','GIN'])
+parser.add_argument('--encoder_model', type=str, default='GraphCL', help='propagation model for encoder',
+                    choices=['BGRL-G2L','GraphCL',])
+parser.add_argument('--dataset', type=str, default='ZINC', 
+                    help='Dataset')
+parser.add_argument('--finetune_dataset', type=str, default='Tox21', 
+                    help='Dataset')
+parser.add_argument('--batch_size', default=8192, type=int,
+                    help="batch_size of graph dataset")
+# GPU setting
+parser.add_argument('--device_id', type=int, default=3,
+                    help="GPU ID")
+# Split
+parser.add_argument('--train_ratio', type=float, default=0.8,
+                    help="Ratio of Training set to train encoder in inductive setting")
+parser.add_argument('--eps', type=float, default=2.0,
+                    help='size of the ball')
+parser.add_argument('--step', type=int, default=10,
+                    help='number of steps in meta IP')
+parser.add_argument('--second_order', action='store_true',
+        default=False, help='whether compute second order gradient')
+parser.add_argument('--random', action='store_true',
+        default=False, help='whether compute second order gradient')
+
+parser.add_argument('--num_wm', type=int, default=20,
+                    help='Number of hidden water marks.')
+parser.add_argument('--watermark_size', type=int, default=20,
+                    help='Number of hidden water marks.')
+parser.add_argument('--test_iteration', type=int, default=50)
+
+parser.add_argument('--lr', type=float, default=0.001,
+                    help='Initial learning rate.')
+parser.add_argument('--weight_decay', type=float, default=0.0,
+                    help='Weight decay (L2 loss on parameters).')
+parser.add_argument('--tau', type=float, default=0.2,
+                    help='Temperature of InfoNEC')
+parser.add_argument('--num_hidden', type=int, default=128,
+                    help='Number of hidden units.')
+parser.add_argument('--num_proj_hidden', type=int, default=128,
+                    help='Number of hidden units in MLP.')
+parser.add_argument('--dropout', type=float, default=0.,
+                    help='Dropout rate (1 - keep probability).')
+parser.add_argument('--num_epochs', type=int, default=200)
+# ZINC masking data setting
+parser.add_argument('--mask_rate', type=float, default=0.15,
+                        help='dropout ratio (default: 0.15)')
+parser.add_argument('--mask_edge', type=int, default=1,
+                        help='whether to mask edges or not together with atoms')
+
+args = parser.parse_known_args()[0]
+
+print(args)
+
+args.cuda =  not args.no_cuda and torch.cuda.is_available()
+device = torch.device(('cuda:{}' if torch.cuda.is_available() else 'cpu').format(args.device_id))
+
+
+#%%
+if(args.dataset == 'ZINC'):
+    from loader import MoleculeDataset
+    dataset_root = os.path.join(package_dir,'dataset/')
+    dataset_name = 'zinc_standard_agent'
+    dataset = MoleculeDataset(dataset_root + dataset_name, dataset=dataset_name, transform = MaskAtom(num_atom_type = 119, num_edge_type = 5, mask_rate = args.mask_rate, mask_edge=args.mask_edge))
+        
+    '''sample only 200k graphs from ZINC'''
+    sampled_idx = utils.obtain_idx_random(args.seed, np.array(list(range(len(dataset)))), size = int(len(dataset) * 0.1))
+    dataset = dataset[sampled_idx]
+else:
+    raise NotImplementedError("Not implemented on this dataset")
+
+if(args.finetune_dataset in ['PROTEINS', 'FRANKENSTEIN', 'MUTAG', 'ENZYMES', 'NCI1']):
+    finetune_dataset = TUDataset(root='./data/', name=args.finetune_dataset,use_node_attr = True)
+elif(args.finetune_dataset in ['Tox21', 'ToxCast', 'BBBP','BACE','SIDER','ClinTox','MUV','HIV']):
+    from loader import MoleculeDataset
+    dataset_root = os.path.join(package_dir,'dataset/')
+    dataset_name = args.finetune_dataset.lower()
+    finetune_dataset = MoleculeDataset(dataset_root + dataset_name, dataset=dataset_name)
+    
+    # dataset = MoleculeNet(root='./data/', name=args.dataset)
+    if args.finetune_dataset == "Tox21":
+        num_tasks = 12
+    elif args.finetune_dataset == "HIV":
+        num_tasks = 1
+    elif args.finetune_dataset == "pcba":
+        num_tasks = 128
+    elif args.finetune_dataset == "MUV":
+        num_tasks = 17
+    elif args.finetune_dataset == "BACE":
+        num_tasks = 1
+    elif args.finetune_dataset == "BBBP":
+        num_tasks = 1
+    elif args.finetune_dataset == "ToxCast":
+        num_tasks = 617
+    elif args.finetune_dataset == "SIDER":
+        num_tasks = 27
+    elif args.finetune_dataset == "ClinTox":
+        num_tasks = 2
+elif(args.finetune_dataset == 'MNIST' or args.finetune_dataset == 'CIFAR10'):
+    finetune_dataset = GNNBenchmarkDataset(root='./data/', name=args.finetune_dataset)
+elif(args.finetune_dataset == 'ZINC'):
+    from loader import MoleculeDataset
+    dataset_root = os.path.join(package_dir,'dataset/')
+    dataset_name = 'zinc_standard_agent'
+    finetune_dataset = MoleculeDataset(dataset_root + dataset_name, dataset=dataset_name, transform = MaskAtom(num_atom_type = 119, num_edge_type = 5, mask_rate = args.mask_rate, mask_edge=args.mask_edge))
+        
+    '''sample only 200k graphs from ZINC'''
+    sampled_idx = utils.obtain_idx_random(args.seed, np.array(list(range(len(finetune_dataset)))), size = int(len(finetune_dataset) * 0.1))
+    finetune_dataset = finetune_dataset[sampled_idx]
+# exit(0)
+#%%
+import random
+import numpy as np
+random.seed(args.seed)
+np.random.seed(args.seed)
+torch.manual_seed(args.seed)
+torch.cuda.manual_seed(args.seed)
+
+
+#%%
+'''generate watermark graph'''
+from Watermark import WatermarkGraph
+idx_pair = utils.obtain_idx_random(args.seed, np.arange(len(dataset)), args.num_wm)
+
+key_watermark = []
+key_syn = []
+wm_generator = WatermarkGraph(args, device)
+from torch_geometric.data import Data, Batch
+for idx in idx_pair:
+    # key_syn.append(dataset[idx])
+
+    p = 0.2
+    num_nodes = args.watermark_size
+    watermark_feat, watermark_edge_index, watermark_edge_weight, watermark_edge_attr = \
+                    wm_generator.gene_random_graph(dataset.data.x, dataset.data.edge_attr, num_nodes, p = p, feat_generation = 'Rand_Samp', attr_generation = 'Rand_Samp')
+    key_syn.append(Data(x=watermark_feat,edge_index=watermark_edge_index, edge_attr=watermark_edge_attr))
+
+    num_nodes = 1
+    watermark_feat, watermark_edge_index, watermark_edge_weight, watermark_edge_attr = \
+                    wm_generator.gene_random_graph(dataset.data.x, dataset.data.edge_attr, num_nodes, p = 0.2, feat_generation = 'Rand_Samp', attr_generation = 'Rand_Samp')
+    key_watermark.append(Data(x=watermark_feat,edge_index=watermark_edge_index, edge_attr=watermark_edge_attr))
+
+key_syn = Batch.from_data_list(key_syn)
+key_watermark = Batch.from_data_list(key_watermark)
+
+
+#%%
+
+from models.AttributeMasking import Encoder
+from models.Backbones import GIN
+import torch.nn as nn
+
+acc_fix_list = []
+acc_finetune_list = []
+
+ind_acc_fix_list = []
+ind_acc_finetune_list = []
+
+ind_IP_fix = []
+ind_IP_finetune = []
+for seed in range(10,10+args.num_repeat):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+
+    args.num_epochs = 200
+
+    gnn = GIN(args.num_hidden, num_layers=2).to(device)
+    project = nn.Sequential(
+                nn.Linear(args.num_hidden, args.num_hidden),
+                nn.ReLU(inplace=True),
+                nn.Linear(args.num_hidden, args.num_hidden))
+
+    gcl = Encoder(args = args, encoder=gnn,project=project,device=device).to(device)
+    from mask_loader import DataLoaderMasking 
+    dataloader = DataLoaderMasking(dataset, batch_size=args.batch_size, shuffle=True, num_workers = 8)
+    # dataloader = DataLoader(dataset, batch_size=args.batch_size,shuffle=True)
+    gcl.pretrain(dataloader, args,verbose=args.debug)
+    # dir_path = "./checkpoint/{}_GCL/".format(args.dataset)
+    # if not os.path.exists(dir_path):
+    #     os.makedirs(dir_path)
+    torch.save(gcl.encoder.state_dict(), "./checkpoint/{}_Masking/mask_{}.pt".format('ZINC200k', seed))
+
+
+    args.num_epochs = 500
+    # gcl.encoder.load_state_dict(torch.load("./checkpoint/{}_Masking/mask_{}.pt".format('ZINC200k', seed)))
+
+    split_train = utils.get_split_self(num_samples=len(finetune_dataset), train_ratio=0.5, test_ratio=0.4,seed=seed,device=device)
+    idx_train = split_train['train']    
+    idx_test = split_train['test']
+    idx_val = split_train['valid']
+    from torch.utils.data import Subset
+    trainloader = DataLoader(Subset(finetune_dataset,idx_train), batch_size=args.batch_size)
+    testloader = DataLoader(Subset(finetune_dataset,idx_test), batch_size=args.batch_size)
+    valloader = DataLoader(Subset(finetune_dataset,idx_val),batch_size=args.batch_size)
+
+    '''
+    finetune pretrained model
+    '''
+    gcl.transfer_finetune(trainloader, testloader, valloader, args, num_tasks=num_tasks, verbose=args.debug)
+    
+
+    acc_fix, IP_fix = gcl.test(trainloader,testloader, key_syn, key_watermark,args)
+    acc_finetune, IP_finetune = gcl.test_finetune(trainloader,testloader, key_syn, key_watermark,num_tasks,args)
+
+    ind_acc_fix_list.append(acc_fix)
+    ind_acc_finetune_list.append(acc_finetune)
+    ind_IP_fix.append(IP_fix)
+    ind_IP_finetune.append(IP_finetune)
+
+    print("Fix acc: {:.4f} Fix IP acc: {:.4f}".format(acc_fix, IP_fix))
+    print("Finetune acc: {:.4f} Finetune IP acc: {:.4f}".format(acc_finetune, IP_finetune))
+
+
+print("=============IP Score=============")
+print("IP Score (Fixed), Indepdenpend: {:.4f}, {:.4f}"\
+      .format(np.mean(ind_IP_fix), np.std(ind_IP_fix)))
+
+print("IP Score (Fine-tune), Indepdenpend: {:.4f}, {:.4f}"\
+      .format(np.mean(ind_IP_finetune), np.std(ind_IP_finetune)))
+
+print("=============Accuracy=============")
+print("Accuracy (Fixed), Indepdenpend: {:.4f}, {:.4f}"\
+      .format(np.mean(ind_acc_fix_list), np.std(ind_acc_fix_list)))
+print("Accuracy (Fine-tune), Indepdenpend: {:.4f}, {:.4f}"\
+      .format(np.mean(ind_acc_finetune_list), np.std(ind_acc_finetune_list)))
+

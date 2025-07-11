@@ -107,14 +107,14 @@ for _ in range(args.num_wm):
     # key_normal.append(dataset[idx])
 
     p = 0.2
-    num_nodes = 20
+    num_nodes = np.clip(int(np.random.normal(np.mean(sizes),np.std(sizes))),1,100)
     watermark_feat, watermark_edge_index, watermark_edge_weight = \
-                    wm_generator.gene_random_graph(dataset.data.x, num_nodes, p = 0.2, feat_generation = 'Rand_Gene')
+                    wm_generator.gene_random_graph(dataset.data.x, num_nodes, p = p, feat_generation = 'Rand_Gene')
     key_syn.append(Data(x=watermark_feat,edge_index=watermark_edge_index))
     key_all.append(Data(x=watermark_feat,edge_index=watermark_edge_index))
-    num_nodes = 20
+    num_nodes = np.clip(int(np.random.normal(np.mean(sizes),np.std(sizes))),1,100)
     watermark_feat, watermark_edge_index, watermark_edge_weight = \
-                    wm_generator.gene_random_graph(dataset.data.x, num_nodes, p = 1, feat_generation = 'Rand_Gene')
+                    wm_generator.gene_random_graph(dataset.data.x, num_nodes, p = 0.2, feat_generation = 'Rand_Gene')
     key_watermark.append(Data(x=watermark_feat,edge_index=watermark_edge_index))
     key_all.append(Data(x=watermark_feat,edge_index=watermark_edge_index))
 key_syn = Batch.from_data_list(key_syn)

@@ -14,6 +14,7 @@ def obtain_idx_random(seed,node_idxs, size):
 
     
 def obtain_idx_distance(args, node_idxs, size, model, dataset, device):
+    size = min(len(node_idxs),size)
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False)
     model.pretrain(dataloader, args, verbose=args.debug)
     if(args.normal_selection == 'distance'):
@@ -33,10 +34,13 @@ def obtain_idx_distance(args, node_idxs, size, model, dataset, device):
         # use K-means to cluster into n groups, and find the nodes with the largest distance to its cluster center
         ## obtain the repreentations of all graphs (or )
         gs = torch.FloatTensor([]).to(device)
+        labels = torch.LongTensor([]).to(device)
         for data in dataloader:
             data = data.to(device)
             _, g = model.encoder(data.x, data.edge_index, data.batch)
             gs = torch.cat((gs,g),dim=0)
+            labels = torch.cat((labels,data.y),dim=0)
+        labels = labels.detach().cpu().numpy()
         ## distance_matrix = F.pairwise_distance(gs[0],gs,keepdim=True)
         gs = gs.detach().cpu().numpy()
         n_clusters = 2
@@ -64,11 +68,17 @@ def get_split_self(num_samples: int, train_ratio: float = 0.1, test_ratio: float
     indices = torch.tensor(perm).to(device)
     train_size = int(num_samples * train_ratio)
     test_size = int(num_samples * test_ratio)
+    idx_test = indices[train_size: test_size + train_size]
+    # randomly split idx_test
+    idx_clean_test = idx_test[:int(len(idx_test)/2)]
+    idx_atk = idx_test[int(len(idx_test)/2):]
     # indices = torch.randperm(num_samples)
     return {
         'train': indices[:train_size],
         'test': indices[train_size: test_size + train_size],
-        'valid': indices[test_size + train_size:]
+        'valid': indices[test_size + train_size:],
+        'clean_test': idx_test[:int(len(idx_test)/2)],
+        'atk': idx_test[int(len(idx_test)/2):]
     }
 
 
@@ -283,27 +293,3 @@ def update_module(module, updates=None, memo=None):
     if hasattr(module, 'flatten_parameters'):
         module._apply(lambda x: x)
     return module
-
-#%%
-from torch_geometric.data import Data
-def inject_trigger(idx_attach,graph,trigger):
-
-    features, edge_index = graph.x, graph.edge_index
-    edge_list = []
-    start = features.shape[0]
-    edge_list.append([idx_attach,start])
-    trojan_edge_index = torch.tensor(edge_list,device=edge_index.device,dtype=torch.long).T
-    tmp_edge_index = trigger.edge_index.clone()
-    tmp_edge_index[0] = start + tmp_edge_index[0]
-    tmp_edge_index[1] = start + tmp_edge_index[1]
-    trojan_edge_index = torch.cat([trojan_edge_index,tmp_edge_index],dim=1)
-    
-    
-    from torch_geometric.utils import to_undirected
-    trojan_edge_index = to_undirected(trojan_edge_index)
-    trojan_edge_index = torch.cat([edge_index,trojan_edge_index],dim=1)
-    trojan_features = torch.cat([features,trigger.x])
-
-    trojan_graph = Data(x=trojan_features,edge_index=trojan_edge_index,y=graph.y)
-    return trojan_graph
-# %%
